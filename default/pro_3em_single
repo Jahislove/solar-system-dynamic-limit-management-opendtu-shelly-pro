@@ -8,10 +8,10 @@
 
 // CONFIG
 let DTU_IP = "192.168.0.168";
-let DTU_PWD = "ttp1b970";
+let DTU_PWD = "password";
 let NUMBER_INVERTER = 3; // number of inverter
 let EM = "EM1" // single phase mode => EM1 , in 3 phases mode => EM 
-let PHASE = 2; //  clamp used for grid power  => 0 = clamp A(cuisine), 1 = clamp B(solaire) , 2 = clamp C(Grid) / en mode triphasé => 0 = total
+let PHASE = 2; //  clamp used for grid power  => 0 = clamp A, 1 = clamp B , 2 = clamp C 
 let GRID = 0; // feed target (in watt) ,ex -800 if you want to export 800w , 0 for zero export
 let INTERVAL = 5; // interval between measure ,sec
 let LIMIT_MIN = 100; // power limit min for inverter
