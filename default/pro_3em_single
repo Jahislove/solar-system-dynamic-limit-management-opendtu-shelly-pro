@@ -2,49 +2,49 @@
   DYNAMIC LIMIT MANAGEMENT / BASIC
   Shelly Pro 3EM & OpenDTU
   06.08.2023, GF78
-  22/08/2025, Jahislove adapting for pro3EM in single phase mode and multiple inverters
+  22/08/2025, Jahislove, adapting for pro3EM in single phase mode and multiple inverters
+  23/08/2025, adding 3 phases mode
 */
 // shelly pro 3EM https://shelly-api-docs.shelly.cloud/gen2/Devices/Gen2/ShellyPro3EM/
 
 // CONFIG
 let DTU_IP = "192.168.0.168";
+let DTU_LOGIN = "admin";
 let DTU_PWD = "password";
 let NUMBER_INVERTER = 3; // number of inverter
-let EM = "EM1" // single phase mode => EM1 , in 3 phases mode => EM 
-let PHASE = 2; //  clamp used for grid power  => 0 = clamp A, 1 = clamp B , 2 = clamp C 
+let EM = "EM1" // shelly mode : single phase mode => EM1 , 3 phases mode => EM 
+let PHASE = 2; //  single phase : clamp used for grid power  => 0 = clamp A, 1 = clamp B , 2 = clamp C / 3 phases mode => 0 = total
 let GRID = 0; // feed target (in watt) ,ex -800 if you want to export 800w , 0 for zero export
-let INTERVAL = 5; // interval between measure ,sec
+let INTERVAL = 5; // interval between measure (sec)
 let LIMIT_MIN = 100; // power limit min for inverter
 let LIMIT_MAX = 1000; // power limit max for inverter
-let LIMIT_STEP_MIN = 50; // min et max step to modify limit
-let LIMIT_STEP_MAX = 500;
-let LIMIT_ROUND = 10;
+let LIMIT_STEP_MIN = 10; // min / max step to modify limit
+let LIMIT_STEP_MAX = 100;
+let LIMIT_ROUND = 10; //if power variation is under this value : no limit modification
 
-
+// nothing to modify below
 Timer.set((INTERVAL || 60) * 1000, true,
 	function () {
-			
-		Shelly.call('HTTP.GET', { url: "http://admin:" + DTU_PWD + "@" + DTU_IP + "/api/livedata/status", timeout: 15, ssl_ca: "*" },
+	    print("-------------------------------------------------------------------");
+		Shelly.call('HTTP.GET', { url: "http://" + DTU_LOGIN + ":" + DTU_PWD + "@" + DTU_IP + "/api/livedata/status", timeout: 15, ssl_ca: "*" },
 			function(result) {
-				
-				//DTU	
-				if (typeof result !== "object" || typeof result.code !== "number" || result.code !== 200 || typeof result.body !== "string") {
+				if (result.code !== 200) {  // check DTU reachable
 					print("ERROR: No DTU data.");
 					return;				
 				}
-				let dtu = JSON.parse(result.body);
-				if (!(dtu.inverters[0].reachable || false)) {
-					print("INFO: DTU is not reachable.");
+				let dtu = JSON.parse(result.body); // check inverter reachable
+				if (dtu.inverters[0].reachable == false) {
+					print("ERROR: Inverter is not reachable.");
 					return;
 				}
-				let dtu_limit = Math.round(dtu.inverters[0].limit_absolute);
+				let dtu_limit = Math.round(dtu.inverters[0].limit_absolute); // get actual limit of inverter 0 (one inverter is enough as all inverter have same value)
 				print("actual inverters limit : " + dtu_limit);
 				
 				// Shelly EM/EM1
-				let shelly = Shelly.getComponentStatus("EM1", PHASE );	
+				let shelly = Shelly.getComponentStatus(EM, PHASE );	
 				print("grid power : " + shelly.act_power);
 				if (!shelly || typeof shelly !== "object" || typeof shelly["act_power"] !== "number") {
-					print("ERROR: Unkown shelly power unkown");
+					print("ERROR: shelly power unkown");
 					return;
 				} 
 				let shelly_power = Math.round(shelly["act_power"] || 0);
@@ -63,25 +63,31 @@ Timer.set((INTERVAL || 60) * 1000, true,
 					print("INFO: No limit adjustment required.");
 					return;
 				}
-				  for (let i = 0; i < NUMBER_INVERTER; i++) { 
-				      Shelly.call(
-					    'HTTP.POST', {
-						    url: "http://admin:" + DTU_PWD + "@" + DTU_IP + "/api/limit/config",
-						    body: "data={\"serial\":\"" +  dtu.inverters[i].serial + "\",\"limit_type\":0,\"limit_value\":" + limit + "}",
-						    content_type: "application/x-www-form-urlencoded",
-						    ssl_ca: "*",
-						    timeout: 15
-					    },
-					    function(result) {
-							if (typeof result !== "object" || typeof result.code !== "number" || result.code !== 200 ) {
-							    print("ERROR: Limit not set");
-							    return;				
-						    }
-					        print("INFO: New limit inv " + i + " set to " + limit);	
-					        return;				
-				        }
-				     );
-				  }    
+				for (let i = 0; i < NUMBER_INVERTER; i++) { 
+				    (function(index) {
+						 Shelly.call(
+							'HTTP.POST', {
+								url: "http://admin:" + DTU_PWD + "@" + DTU_IP + "/api/limit/config",
+								body: "data={\"serial\":\"" +  dtu.inverters[index].serial + "\",\"limit_type\":0,\"limit_value\":" + limit + "}",
+								content_type: "application/x-www-form-urlencoded",
+								ssl_ca: "*",
+								timeout: 15
+							},
+							function(result) { // callback
+								//print(result);
+								let body = JSON.parse(result.body);
+								//print(body);
+								//print(body.code);		
+								if ( body.code !== 1001) {
+									print("ERROR: Limit not set : " + body.type + " : " + body.message);
+									return;				
+								}
+								print("inverter " + index + " answer : " + body.type + " , " + body.message + " New limit " + limit);	
+								return;				
+							}
+						);
+				    })(i);
+				}
 			}
 		);
 	}
