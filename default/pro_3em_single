@@ -3,92 +3,181 @@
   Shelly Pro 3EM & OpenDTU
   06.08.2023, GF78
   22/08/2025, Jahislove, adapting for pro3EM in single phase mode and multiple inverters
-  23/08/2025, adding 3 phases mode
 */
 // shelly pro 3EM https://shelly-api-docs.shelly.cloud/gen2/Devices/Gen2/ShellyPro3EM/
+// en mode monophasé => EM1
+// en mode triphasé => EM 
+// warning this script is limited to 4 inverters : as Shelly accept only 5 RPC call simultaneously , 1 is already used for http.get actual DTU limit 
+// if you need more than 4 inverters , you must adapt this script to update a first batch of inverter , make a pause ( take into account the timeout) and then a second batch
 
 // CONFIG
 let DTU_IP = "192.168.0.168";
 let DTU_LOGIN = "admin";
-let DTU_PWD = "password";
+let DTU_PWD = "ttp1b970";
 let NUMBER_INVERTER = 3; // number of inverter
-let EM = "EM1" // shelly mode : single phase mode => EM1 , 3 phases mode => EM 
-let PHASE = 2; //  single phase : clamp used for grid power  => 0 = clamp A, 1 = clamp B , 2 = clamp C / 3 phases mode => 0 = total
+let EM = "EM1" // single phase mode => EM1 , 3 phases mode => EM 
+let PHASE = 2; //  clamp used for grid power  => 0 = clamp A(cuisine), 1 = clamp B(solaire) , 2 = clamp C(Grid) / en mode triphasé => 0 = total
 let GRID = 0; // feed target (in watt) ,ex -800 if you want to export 800w , 0 for zero export
 let INTERVAL = 5; // interval between measure (sec)
-let LIMIT_MIN = 100; // power limit min for inverter
+let LIMIT_MIN = 50; // power limit min for inverter
 let LIMIT_MAX = 1000; // power limit max for inverter
 let LIMIT_STEP_MIN = 10; // min / max step to modify limit
-let LIMIT_STEP_MAX = 100;
-let LIMIT_ROUND = 10; //if power variation is under this value : no limit modification
+let LIMIT_STEP_MAX = 500;
+let LIMIT_ROUND = 50; //if power variation is under this value : no limit modification
 
-// nothing to modify below
-Timer.set((INTERVAL || 60) * 1000, true,
-	function () {
-	    print("-------------------------------------------------------------------");
-		Shelly.call('HTTP.GET', { url: "http://" + DTU_LOGIN + ":" + DTU_PWD + "@" + DTU_IP + "/api/livedata/status", timeout: 15, ssl_ca: "*" },
-			function(result) {
-				if (result.code !== 200) {  // check DTU reachable
-					print("ERROR: No DTU data.");
+function mainLoop() {
+	print("-------------------------------------------------------------------");
+	Call('HTTP.GET', { url: "http://" + DTU_LOGIN + ":" + DTU_PWD + "@" + DTU_IP + "/api/livedata/status", timeout: 2, ssl_ca: "*" }, callback);
+}
+
+function callback(result){ // all function call must be in callback because of asynchronous answer
+	try{
+		dtuObj = getActualLimit(result);
+		let dtu_limit = Math.round(dtuObj.inverters[0].limit_absolute); // get actual limit of inverter 0 (one inverter is enough as all inverter have same value)
+		print("Actual DTU limit : " + dtu_limit);
+		
+		shelly_power = getActualGridPower(EM, PHASE);
+		print("Actual GRID Power : " + shelly_power);
+		
+		newLimit = calculLimit(dtu_limit, shelly_power, GRID, LIMIT_STEP_MIN, LIMIT_STEP_MAX, LIMIT_ROUND);
+		print("new DTU limit : " + newLimit);
+		if(newLimit ===  (Math.round(dtu_limit / (LIMIT_ROUND || 1)) * ( LIMIT_ROUND || 1))) {
+			print("INFO: No limit adjustment required.");
+			return;
+		}
+		setLimit(NUMBER_INVERTER, DTU_LOGIN, DTU_PWD, DTU_IP, newLimit, dtuObj);
+	}
+	catch(error){ // on any error , abandon and wait new loop
+		return;
+	}
+}
+
+function getActualLimit(result) {
+	// if ( !result || typeof result!== "object" ) {  // check DTU reachable
+		// print("ERROR: No DTU data.");
+		// return;				
+	// }
+	// if (result.code !== 200) {  // check DTU reachable
+		// print("ERROR: return not 200.");
+		// return;				
+	// }
+	let dtuObj = JSON.parse(result.body); // check inverter reachable
+	// if (dtuObj.inverters[0].reachable == false) {
+		// print("ERROR: Inverter is not reachable.");
+		// return;
+	// }
+	return dtuObj;
+}
+
+function getActualGridPower(EM,PHASE){
+	// Shelly EM/EM1
+	let shelly = Shelly.getComponentStatus(EM, PHASE );	
+	// if (!shelly || typeof shelly !== "object" || typeof shelly["act_power"] !== "number") {
+		// print("ERROR: shelly power unkown");
+		// return;
+	// } 
+	let shelly_power = Math.round(shelly["act_power"] || 0);
+	return shelly_power;
+}
+
+function calculLimit(dtu_limit, shelly_power, GRID, LIMIT_STEP_MIN, LIMIT_STEP_MAX, LIMIT_ROUND){
+	let limit = dtu_limit + shelly_power - GRID;
+	limit = (Math.abs(dtu_limit - limit) < LIMIT_STEP_MIN) ? dtu_limit : limit;
+	limit = (Math.abs(dtu_limit - limit) > LIMIT_STEP_MAX) 
+			? (limit > dtu_limit) ? dtu_limit + LIMIT_STEP_MAX : dtu_limit - LIMIT_STEP_MAX
+			: limit;
+	limit = Math.min(limit, LIMIT_MAX);
+	limit = Math.max(limit, LIMIT_MIN, 0); 
+	limit = Math.round(limit / LIMIT_ROUND || 1, 0) * ( LIMIT_ROUND || 1);	
+	return limit;
+}
+
+function setLimit(NUMBER_INVERTER, DTU_LOGIN, DTU_PWD, DTU_IP, limit, dtuObj){
+	for (let i = 0; i < NUMBER_INVERTER; i++) { 
+		(function(index) {
+			Call(
+				'HTTP.POST', {
+					url: "http://"+ DTU_LOGIN + ":" + DTU_PWD + "@" + DTU_IP + "/api/limit/config",
+					body: "data={\"serial\":\"" +  dtuObj.inverters[index].serial + "\",\"limit_type\":0,\"limit_value\":" + limit + "}",
+					content_type: "application/x-www-form-urlencoded",
+					ssl_ca: "*",
+					timeout: 2
+				},
+				function(result) { // callback
+					if (!result|| typeof result!== "object" ) {
+					  print("ERROR: callback not set " );
+					  return;
+					}
+					let body = JSON.parse(result.body);
+					if ( body.code !== 1001) {
+						print("ERROR: Limit not set : " + body.type + " : " + body.message);
+						return;				
+					}
+					print("inverter " + index + " answer : " + body.type + " , " + body.message + " New limit " + limit);	
 					return;				
 				}
-				let dtu = JSON.parse(result.body); // check inverter reachable
-				if (dtu.inverters[0].reachable == false) {
-					print("ERROR: Inverter is not reachable.");
-					return;
-				}
-				let dtu_limit = Math.round(dtu.inverters[0].limit_absolute); // get actual limit of inverter 0 (one inverter is enough as all inverter have same value)
-				print("actual inverters limit : " + dtu_limit);
-				
-				// Shelly EM/EM1
-				let shelly = Shelly.getComponentStatus(EM, PHASE );	
-				print("grid power : " + shelly.act_power);
-				if (!shelly || typeof shelly !== "object" || typeof shelly["act_power"] !== "number") {
-					print("ERROR: shelly power unkown");
-					return;
-				} 
-				let shelly_power = Math.round(shelly["act_power"] || 0);
-
-				// Limit
-				let limit = dtu_limit + shelly_power - GRID;
-				limit = (Math.abs(dtu_limit - limit) < LIMIT_STEP_MIN) ? dtu_limit : limit;
-				limit = (Math.abs(dtu_limit - limit) > LIMIT_STEP_MAX) 
-						? (limit > dtu_limit) ? dtu_limit + LIMIT_STEP_MAX : dtu_limit - LIMIT_STEP_MAX
-						: limit;
-				limit = Math.min(limit, LIMIT_MAX);
-				limit = Math.max(limit, LIMIT_MIN, 0); 
-				limit = Math.round(limit / LIMIT_ROUND || 1, 0) * ( LIMIT_ROUND || 1);	
-				print("new limit : " + limit);
-				if(limit ===  (Math.round(dtu_limit / (LIMIT_ROUND || 1)) * ( LIMIT_ROUND || 1))) {
-					print("INFO: No limit adjustment required.");
-					return;
-				}
-				for (let i = 0; i < NUMBER_INVERTER; i++) { 
-				    (function(index) {
-						 Shelly.call(
-							'HTTP.POST', {
-								url: "http://admin:" + DTU_PWD + "@" + DTU_IP + "/api/limit/config",
-								body: "data={\"serial\":\"" +  dtu.inverters[index].serial + "\",\"limit_type\":0,\"limit_value\":" + limit + "}",
-								content_type: "application/x-www-form-urlencoded",
-								ssl_ca: "*",
-								timeout: 15
-							},
-							function(result) { // callback
-								//print(result);
-								let body = JSON.parse(result.body);
-								//print(body);
-								//print(body.code);		
-								if ( body.code !== 1001) {
-									print("ERROR: Limit not set : " + body.type + " : " + body.message);
-									return;				
-								}
-								print("inverter " + index + " answer : " + body.type + " , " + body.message + " New limit " + limit);	
-								return;				
-							}
-						);
-				    })(i);
-				}
-			}
-		);
+			);
+		})(i); // special loop to pass i  to function
 	}
-);
+}
+
+function Main(){
+	Timer.set((INTERVAL || 60) * 1000, true, mainLoop ); // loop every INTERVAL second
+}
+
+//toolbox : to be able to replace Shelly.call by Call (for overiding 5 RPC call limit in shelly)
+// https://shelly-forum.com/thread/24924-shelly-script-toolbox-v1-0/?postID=257597#post257597
+//Toolbox v1.0(base), a universal Toolbox for Shelly Scripts
+function Efilter(d,p,deBug) { //Event Filter, d=eventdata, p={device:[], filterKey:[], filterValue:[], noInfo:true, inData:true}->optional_parameter 
+    try{
+        let fR= {}; //d.info= d.info.data; 
+        if(p.noInfo){fR= d; d= {}; d.info= fR; fR= {};} if(p.inData && d.info.data){Object.assign(d.info,d.info.data) delete d.info.data;}
+        if(!d.info) fR.useless= true; if(p.device && p.device.length && p.device.indexOf(d.info.component) === -1) fR.useless= true;
+        if(p.device && p.device.length && !fR.useless && !p.filterKey && !p.filterValue) fR= d.info;
+        if(p.filterKey && !fR.useless) for(f of p.filterKey) for(k in d.info) if(f === k) fR[k]= d.info[k];
+        if(p.filterValue && !fR.useless) for(f of p.filterValue) for(v of d.info) if(Str(v) && f === v) fR[Str(v)]= v;
+        if(deBug) print('\nDebug: EventData-> ', d, '\n\nDebug: Result-> ', fR, '\n');
+        if(Str(fR) === '{}' || fR.useless){return;} return fR;}catch(e){ErrorMsg(e,'Efilter()');}}
+function ErrorChk(r,e,m,d){ //Shelly.call error check
+    try{
+        aC--; if(aC<0) aC= 0;
+        if(d.CB && d.uD) d.CB(r,d.uD); if(d.CB && !d.uD) d.CB(r);
+        if(!d.CB && d.uD) print('Debug: ',d.uD); if(e) throw new Error(Str(m)); 
+        if(Str(r) && Str(r.code) && r.code !== 200) throw new Error(Str(r));
+        }catch(e){ErrorMsg(e,'ErrorChk(), call Answer');}}
+function Cqueue(){ //Shelly.call queue
+  try{
+      if(!cCache[0] && !nCall[0]) return; 
+      while(cCache[0] && aC < callLimit){if(cCache[0] && !nCall[0]){nCall= cCache[0]; cCache.splice(0,1);}
+      if(nCall[0] && aC < callLimit){Call(nCall[0],nCall[1],nCall[2],nCall[3],nCall[4]); nCall= [];}} if(tH9){Timer.clear(tH9); tH9= 0;}
+      if(nCall[0] || cCache[0])if(cSp <= 0) cSp= 0.1; tH9= Timer.set(1000*cSp,0,function(){tH9= 0; Cqueue();});}catch(e){ErrorMsg(e,'Cqueue()');}}
+function Call(m,p,CB,uD,deBug){ //Upgrade Shelly.call
+    try{
+        let d= {};
+        if(deBug) print('Debug: calling:',m,p); if(CB) d.CB= CB; if(Str(uD)) d.uD= uD; if(!m && CB){CB(uD); return;}
+        if(aC < callLimit){aC++; Shelly.call(m,p,ErrorChk,d);}else if(cCache.length < cacheLimit){
+        cCache.push([m,p,CB,uD,deBug]); if(deBug) print('Debug: save call:',m,p,', call queue now:',cCache.length); Cqueue();
+        }else{throw new Error('to many Calls in use, droping call: '+Str(m)+', '+Str(p));}}catch(e){ErrorMsg(e,'Call()');}}
+function Str(d){ //Upgrade JSON.stringify
+    try{
+        if(d === null || d === undefined) return null; if(typeof d === 'string')return d; 
+        return JSON.stringify(d);}catch(e){ErrorMsg(e,'Str()');}}
+function Cut(f,k,o,i){ //Upgrade slice f=fullData, k=key-> where to cut, o=offset->offset behind key, i=invertCut
+    try{
+        let s= f.indexOf(k); if(s === -1) return null; if(o) s= s+o.length || s+o; if(i) return f.slice(0,s); 
+        return f.slice(s);}catch(e){ErrorMsg(e,'Cut()');}}
+function Setup(){ //Wating 2sek, to avoid a Shelly FW Bug
+    try{
+        if(Main && !tH9){tH9= Timer.set(2000,0,function(){print('\nStatus: started Script _[', scriptN,']_');
+        if(callLimit > 4){callLimit= 4;} try{Main();}catch(e){ErrorMsg(e,'Main()'); tH9= 0; Setup();}});}}catch(e){ErrorMsg(e,'Setup()');}}
+function ErrorMsg(e,s,deBug){ //Toolbox formatted Error Msg
+     try{
+         let i=0; if(Cut(e.message, '-104: Timed out')) i= 'wrong URL or device may be offline';
+         if(Cut(e.message, 'calls in progress')) i= 'reduce _[ callLimit ]_ by 1 and try again, its a global variabel at the end of the toolbox';
+         if(s === 'Main()' || deBug) i= e.stack; if(Cut(e.message, '"Main" is not')) i= 'define a Main() function before using Setup()';
+         print('Error:',s || "",'---> ',e.type,e.message); if(i) print('Info: maybe -->',i);}catch(e){print('Error: ErrorMsg() --->',JSON.stringify(e));}}
+var tH8= 0, tH9= 0, aC= 0, cCache= [], nCall= [], callLimit= 4, cacheLimit= 40, cSp= 0.1; //Toolbox global variable
+var Status= Shelly.getComponentStatus, Config= Shelly.getComponentConfig; //Renamed native function 
+var info= Shelly.getDeviceInfo(), scriptID= Shelly.getCurrentScriptId(), scriptN= Config('script',scriptID).name; //Pseudo const, variabel
+//Toolbox v1.0(base), Shelly FW >1.0.8
+Setup();
